@@ -35,9 +35,7 @@ pipeline {
 
 stage('Start SonarQube') {
     steps {
-        echo "Suppression éventuelle du conteneur SonarQube existant..."
-        sh "docker rm -f sonarqube || true"
-
+        
         echo "Démarrage du conteneur SonarQube..."
         sh """
         docker run -d --name sonarqube \
