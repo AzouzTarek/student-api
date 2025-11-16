@@ -13,7 +13,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                git 'https://github.com/AzouzTarek/student-api.git'
+                git branch: 'main', url: 'https://github.com/AzouzTarek/student-api.git'
             }
         }
 
