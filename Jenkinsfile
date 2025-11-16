@@ -51,12 +51,25 @@ stage('Start SonarQube') {
 
 
         stage('Code Quality & Security') {
-            steps {
-                sh "sonar-scanner -Dsonar.projectKey=StudentAPI -Dsonar.sources=. -Dsonar.login=${SONAR_TOKEN}"
-                sh "trivy fs ."
-                sh "trivy image ${IMAGE_NAME}:${IMAGE_TAG}"
-            }
+    steps {
+        withSonarQubeEnv('SonarQube') {
+            sh """
+                sonar-scanner \
+                -Dsonar.projectKey=StudentAPI \
+                -Dsonar.sources=. \
+                -Dsonar.java.binaries=target \
+                -Dsonar.login=$SONAR_TOKEN
+            """
         }
+
+        // Scan filesystem avec Trivy
+        sh "trivy fs ."
+
+        // Scan de l’image Docker
+        sh "trivy image ${IMAGE_NAME}:${IMAGE_TAG}"
+    }
+}
+
 
         stage('Notifications') {
             steps {
