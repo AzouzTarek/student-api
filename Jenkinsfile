@@ -19,7 +19,7 @@ pipeline {
 
         stage('Build & Docker') {
             steps {
-                sh './mvnw clean package -DskipTests' // ou gradle build
+                sh './mvnw clean package -DskipTests'
                 sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
                 sh "docker login -u ${DOCKER_HUB_CRED_USR} -p ${DOCKER_HUB_CRED_PSW}"
                 sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -43,11 +43,10 @@ pipeline {
 
         stage('Notifications') {
             steps {
-                slackSend (
+                slackSend(
                     channel: '#jenkins',
                     color: 'good',
                     message: "Build ${env.BUILD_NUMBER} terminé avec succès !",
-                    teamDomain: 'tonteam',
                     tokenCredentialId: 'slack-webhook'
                 )
             }
@@ -76,11 +75,10 @@ pipeline {
 
     post {
         failure {
-            slackSend (
+            slackSend(
                 channel: '#jenkins',
                 color: 'danger',
                 message: "Build ${env.BUILD_NUMBER} a échoué !",
-                teamDomain: 'tonteam',
                 tokenCredentialId: 'slack-webhook'
             )
         }
