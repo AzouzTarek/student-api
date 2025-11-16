@@ -33,6 +33,25 @@ pipeline {
             }
         }
 
+stage('Start SonarQube') {
+    steps {
+        echo "Suppression éventuelle du conteneur SonarQube existant..."
+        sh "docker rm -f sonarqube || true"
+
+        echo "Démarrage du conteneur SonarQube..."
+        sh """
+        docker run -d --name sonarqube \
+            -p 9000:9000 \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+            sonarqube:community
+        """
+
+        echo "Attente que SonarQube soit prêt..."
+        sh "sleep 30"
+    }
+}
+
+
         stage('Code Quality & Security') {
             steps {
                 sh "sonar-scanner -Dsonar.projectKey=StudentAPI -Dsonar.sources=. -Dsonar.login=${SONAR_TOKEN}"
