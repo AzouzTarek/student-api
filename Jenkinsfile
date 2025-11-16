@@ -40,6 +40,8 @@ stage('Start SonarQube') {
     steps {
         
         echo "Démarrage du conteneur SonarQube..."
+// Supprimer ancien conteneur SonarQube s'il existe
+        sh "docker rm -f sonarqube || true"
         sh """
         docker run -d --name sonarqube \
             -p 9000:9000 \
