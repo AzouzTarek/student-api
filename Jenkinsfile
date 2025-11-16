@@ -29,6 +29,9 @@ pipeline {
         stage('Tests & Local Deployment') {
             steps {
                 sh './mvnw test'
+        // Supprimer l'ancien conteneur s'il existe pour éviter le conflit
+        sh "docker rm -f student-api || true"
+
                 sh "docker run -d --name student-api -p ${APP_PORT}:${APP_PORT} ${IMAGE_NAME}:${IMAGE_TAG}"
             }
         }
