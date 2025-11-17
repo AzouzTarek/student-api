@@ -53,7 +53,7 @@ pipeline {
 
         stage('Tests & Deployment') {
             steps {
-                sh './mvnw test'
+                sh 'SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/studentdb ./mvnw test'
 
                 // Supprimer l'ancien conteneur de l'app si existe
                 sh "docker rm -f student-api || true"
