@@ -8,12 +8,37 @@ pipeline {
         IMAGE_NAME = 'azouztarek/student-api'
         IMAGE_TAG = "v${env.BUILD_NUMBER}"
         APP_PORT = "8081"
+        DB_CONTAINER = "postgres-student"
+        NETWORK = "student-net"
     }
 
     stages {
         stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/AzouzTarek/student-api.git'
+            }
+        }
+
+        stage('Setup Docker Network & PostgreSQL') {
+            steps {
+                script {
+                    // Créer le réseau Docker si nécessaire
+                    sh "docker network inspect ${NETWORK} || docker network create ${NETWORK}"
+
+                    // Supprimer l'ancien conteneur DB si existe
+                    sh "docker rm -f ${DB_CONTAINER} || true"
+
+                    // Lancer PostgreSQL
+                    sh """
+                        docker run -d --name ${DB_CONTAINER} \
+                        --network ${NETWORK} \
+                        -e POSTGRES_USER=student \
+                        -e POSTGRES_PASSWORD=student \
+                        -e POSTGRES_DB=studentdb \
+                        -p 5432:5432 \
+                        postgres:15
+                    """
+                }
             }
         }
 
@@ -26,55 +51,59 @@ pipeline {
             }
         }
 
-        stage('Tests & Local Deployment') {
+        stage('Tests & Deployment') {
             steps {
                 sh './mvnw test'
-        // Supprimer l'ancien conteneur s'il existe pour éviter le conflit
-        sh "docker rm -f student-api || true"
 
-                sh "docker run -d --name student-api -p ${APP_PORT}:${APP_PORT} ${IMAGE_NAME}:${IMAGE_TAG}"
+                // Supprimer l'ancien conteneur de l'app si existe
+                sh "docker rm -f student-api || true"
+
+                // Lancer l'app dans le même réseau que la DB
+                sh """
+                    docker run -d --name student-api \
+                    --network ${NETWORK} \
+                    -p ${APP_PORT}:${APP_PORT} \
+                    ${IMAGE_NAME}:${IMAGE_TAG}
+                """
             }
         }
 
-stage('Start SonarQube') {
-    steps {
-        
-        echo "Démarrage du conteneur SonarQube..."
-// Supprimer ancien conteneur SonarQube s'il existe
-        sh "docker rm -f sonarqube || true"
-        sh """
-        docker run -d --name sonarqube \
-            -p 9000:9000 \
-            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
-            sonarqube:community
-        """
+        stage('Start SonarQube') {
+            steps {
+                // Supprimer ancien conteneur SonarQube si existe
+                sh "docker rm -f sonarqube || true"
 
-        echo "Attente que SonarQube soit prêt..."
-        sh "sleep 30"
-    }
-}
-
-
-        stage('Code Quality & Security') {
-    steps {
-        withSonarQubeEnv('SonarQube') {
-            sh """
-                sonar-scanner \
-                -Dsonar.projectKey=StudentAPI \
-                -Dsonar.sources=. \
-                -Dsonar.java.binaries=target \
-                -Dsonar.login=$SONAR_TOKEN
-            """
+                // Lancer SonarQube
+                sh """
+                    docker run -d --name sonarqube \
+                    -p 9000:9000 \
+                    -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+                    sonarqube:community
+                """
+                echo "Attente que SonarQube soit prêt..."
+                sh "sleep 30"
+            }
         }
 
-        // Scan filesystem avec Trivy
-        sh "trivy fs ."
+        stage('Code Quality & Security') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh """
+                        sonar-scanner \
+                        -Dsonar.projectKey=StudentAPI \
+                        -Dsonar.sources=. \
+                        -Dsonar.java.binaries=target \
+                        -Dsonar.login=$SONAR_TOKEN
+                    """
+                }
 
-        // Scan de l’image Docker
-        sh "trivy image ${IMAGE_NAME}:${IMAGE_TAG}"
-    }
-}
+                // Scan filesystem avec Trivy
+                sh "trivy fs ."
 
+                // Scan de l’image Docker
+                sh "trivy image ${IMAGE_NAME}:${IMAGE_TAG}"
+            }
+        }
 
         stage('Notifications') {
             steps {
@@ -90,20 +119,19 @@ stage('Start SonarQube') {
         stage('GitOps Deployment') {
             steps {
                 sh """
-                git clone https://github.com/AzouzTarek/k8s-manifests.git
-                cd k8s-manifests
-                sed -i 's|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' deployment.yaml
-                git commit -am 'Update image ${IMAGE_TAG}'
-                git push origin main
+                    git clone https://github.com/AzouzTarek/k8s-manifests.git
+                    cd k8s-manifests
+                    sed -i 's|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' deployment.yaml
+                    git commit -am 'Update image ${IMAGE_TAG}'
+                    git push origin main
+                    argocd app sync student-api
                 """
-                sh "argocd app sync student-api"
             }
         }
 
         stage('Monitoring & Alerting') {
             steps {
-                echo "Prometheus et Grafana doivent être configurés sur le cluster Kubernetes."
-                echo "Création de dashboards et alertes spécifiques à Spring Boot."
+                echo "Prometheus et Grafana doivent être configurés pour surveiller student-api"
             }
         }
     }
