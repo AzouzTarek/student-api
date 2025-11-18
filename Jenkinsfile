@@ -39,16 +39,13 @@ pipeline {
               postgres:15
           """
 
-          // Correct health check loop
+          // Attente PostgreSQL prêt
           sh '''
-            for i in {1..60}; do
-              STATUS=$(docker inspect --format='{{json .State.Health.Status}}' $DB_CONTAINER 2>/dev/null | tr -d '"')
-              if [ "$STATUS" = "healthy" ]; then
-                exit 0
-              fi
+            for i in {1..90}; do
+              docker exec $DB_CONTAINER pg_isready -U student -d studentdb && exit 0
               sleep 2
             done
-            echo "Postgres did not become healthy in time"
+            echo "Postgres did not become ready in time"
             docker logs $DB_CONTAINER || true
             exit 1
           '''
@@ -166,4 +163,3 @@ pipeline {
     }
   }
 }
-
