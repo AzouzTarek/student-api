@@ -39,14 +39,17 @@ pipeline {
               postgres:15
           """
 
+          // Correct health check loop
           sh '''
             for i in {1..60}; do
-              STATUS=$(docker inspect --format='{{json .State.Health.Status}}' '"${DB_CONTAINER}"' 2>/dev/null | tr -d '"')
-              if [ "$STATUS" = "healthy" ]; then exit 0; fi
+              STATUS=$(docker inspect --format='{{json .State.Health.Status}}' $DB_CONTAINER 2>/dev/null | tr -d '"')
+              if [ "$STATUS" = "healthy" ]; then
+                exit 0
+              fi
               sleep 2
             done
             echo "Postgres did not become healthy in time"
-            docker logs '"${DB_CONTAINER}"' || true
+            docker logs $DB_CONTAINER || true
             exit 1
           '''
         }
@@ -56,7 +59,7 @@ pipeline {
     stage('Unit Tests') {
       steps {
         sh '''
-          SPRING_DATASOURCE_URL=jdbc:postgresql://'"${DB_CONTAINER}"':5432/studentdb \
+          SPRING_DATASOURCE_URL=jdbc:postgresql://$DB_CONTAINER:5432/studentdb \
           SPRING_DATASOURCE_USERNAME=student \
           SPRING_DATASOURCE_PASSWORD=student \
           ./mvnw -B -Dmaven.test.failure.ignore=false test
@@ -80,7 +83,6 @@ pipeline {
       steps {
         script {
           sh 'mkdir -p reports'
-          // Scan du code source
           sh """
             trivy fs --exit-code 1 --severity CRITICAL,HIGH . | tee reports/trivy-fs.txt
             trivy fs --exit-code 1 --severity CRITICAL,HIGH . -f json -o reports/trivy-fs.json
@@ -150,7 +152,7 @@ pipeline {
     }
     failure {
       script {
-        sh "docker logs ${DB_CONTAINER} || true"
+        sh "docker logs $DB_CONTAINER || true"
         sh """
           curl -X POST -H 'Content-type: application/json' \
             --data '{"text":"❌ *Pipeline FAILED* for job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"}' \
@@ -164,3 +166,4 @@ pipeline {
     }
   }
 }
+
