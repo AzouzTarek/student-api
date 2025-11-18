@@ -1,6 +1,11 @@
 pipeline {
   agent any
 
+  options {
+    // Optional: skip implicit SCM checkout so we only use our 'Checkout' stage
+    skipDefaultCheckout(true)
+  }
+
   environment {
     DOCKER_HUB_CRED = credentials('dockerhub-creds')
     SONAR_TOKEN     = credentials('sonarqube-token')
@@ -24,16 +29,10 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
-          // Create network if not exists
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
-
-          // Remove old container if exists
           sh "docker rm -f ${DB_CONTAINER} || true"
-
-          // Ensure volume exists
           sh "docker volume create ${DB_CONTAINER}-data || true"
 
-          // Start PostgreSQL
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -44,7 +43,7 @@ pipeline {
               postgres:15
           """
 
-          // WAIT — no timeout, no fixed delay — waits until PostgreSQL is READY
+          // Wait until Postgres is ready
           sh '''
             echo "⏳ Waiting for PostgreSQL to become ready..."
             until docker exec postgres-student pg_isready -U student -d studentdb; do
@@ -58,10 +57,9 @@ pipeline {
 
     stage('Unit Tests') {
       steps {
+        // Activate the 'test' profile so tests pick up src/test/resources/application-test.properties
         sh '''
-          SPRING_DATASOURCE_URL=jdbc:postgresql://postgres-student:5432/studentdb \
-          SPRING_DATASOURCE_USERNAME=student \
-          SPRING_DATASOURCE_PASSWORD=student \
+          export SPRING_PROFILES_ACTIVE=test
           ./mvnw -B -Dmaven.test.failure.ignore=false test
         '''
       }
@@ -96,10 +94,8 @@ pipeline {
     stage('Deployment') {
       steps {
         script {
-          // Cleanup previous app container if exists
           sh "docker rm -f ${APP_CONTAINER} || true"
 
-          // Deploy container
           sh """
             docker run -d --name ${APP_CONTAINER} \
               --network ${NETWORK} \
@@ -128,18 +124,19 @@ pipeline {
         }
       }
     }
-
   } // stages
 
   post {
-
     success {
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        sh '''
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\": \"✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}\"}" \
-          "$SLACK"
-        '''
+        sh """
+          curl -X POST -H 'Content-type: application/json' \
+          --data @- "$SLACK" <<'JSON'
+          {
+            "text": "✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
+          }
+JSON
+        """
       }
       echo "🎉 Build OK"
     }
@@ -147,11 +144,14 @@ pipeline {
     failure {
       sh "docker logs ${DB_CONTAINER} || true"
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        sh '''
-          curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\": \"❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}\"}" \
-          "$SLACK"
-        '''
+        sh """
+          curl -X POST -H 'Content-type: application/json' \
+          --data @- "$SLACK" <<'JSON'
+          {
+            "text": "❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}"
+          }
+JSON
+        """
       }
       echo "❌ Build failed"
     }
@@ -161,4 +161,3 @@ pipeline {
     }
   }
 }
-
