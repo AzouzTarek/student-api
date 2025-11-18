@@ -56,14 +56,17 @@ pipeline {
     }
 
     stage('Unit Tests') {
-      steps {
-        // Activate the 'test' profile so tests pick up src/test/resources/application-test.properties
-        sh '''
-          export SPRING_PROFILES_ACTIVE=test
-          ./mvnw -B -Dmaven.test.failure.ignore=false test
-        '''
-      }
-    }
+  steps {
+    sh '''
+      ./mvnw -B -Dmaven.test.failure.ignore=false \
+        -Dspring.datasource.url=jdbc:postgresql://postgres-student:5432/studentdb \
+        -Dspring.datasource.username=student \
+        -Dspring.datasource.password=student \
+        -Dspring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect \
+        test
+    '''
+  }
+}
 
     stage('Build & Docker') {
       steps {
