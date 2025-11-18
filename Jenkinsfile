@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   options {
-    // Optional: skip implicit SCM checkout so we only use our 'Checkout' stage
+    // On garde un checkout explicite uniquement dans notre stage 'Checkout'
     skipDefaultCheckout(true)
   }
 
@@ -29,13 +29,20 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
+          // Crée le réseau si besoin
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
+
+          // Nettoie l'ancien conteneur si présent
           sh "docker rm -f ${DB_CONTAINER} || true"
+
+          // Volume persistant
           sh "docker volume create ${DB_CONTAINER}-data || true"
 
+          // 👉 IMPORTANT : on expose le port 5432 sur l'hôte pour les tests Maven
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
+              -p 5432:5432 \
               -v ${DB_CONTAINER}-data:/var/lib/postgresql/data \
               -e POSTGRES_USER=student \
               -e POSTGRES_PASSWORD=student \
@@ -43,7 +50,7 @@ pipeline {
               postgres:15
           """
 
-          // Wait until Postgres is ready
+          // Attend que Postgres soit prêt (pg_isready)
           sh '''
             echo "⏳ Waiting for PostgreSQL to become ready..."
             until docker exec postgres-student pg_isready -U student -d studentdb; do
@@ -56,17 +63,18 @@ pipeline {
     }
 
     stage('Unit Tests') {
-  steps {
-    sh '''
-      ./mvnw -B -Dmaven.test.failure.ignore=false \
-        -Dspring.datasource.url=jdbc:postgresql://postgres-student:5432/studentdb \
-        -Dspring.datasource.username=student \
-        -Dspring.datasource.password=student \
-        -Dspring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect \
-        test
-    '''
-  }
-}
+      steps {
+        // 👉 Les tests tournent sur l'hôte : on vise 127.0.0.1:5432 (port exposé)
+        sh '''
+          ./mvnw -B -Dmaven.test.failure.ignore=false \
+            -Dspring.datasource.url=jdbc:postgresql://127.0.0.1:5432/studentdb \
+            -Dspring.datasource.username=student \
+            -Dspring.datasource.password=student \
+            -Dspring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect \
+            test
+        '''
+      }
+    }
 
     stage('Build & Docker') {
       steps {
@@ -99,6 +107,7 @@ pipeline {
         script {
           sh "docker rm -f ${APP_CONTAINER} || true"
 
+          // 👉 Ici on reste dans le réseau Docker : on peut utiliser le host 'postgres-student'
           sh """
             docker run -d --name ${APP_CONTAINER} \
               --network ${NETWORK} \
@@ -133,7 +142,7 @@ pipeline {
     success {
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
         sh """
-          curl -X POST -H 'Content-type: application/json' \
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
           --data @- "$SLACK" <<'JSON'
           {
             "text": "✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
@@ -147,8 +156,9 @@ JSON
     failure {
       sh "docker logs ${DB_CONTAINER} || true"
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
+        // Warning d'interpolation de secret attendu, non bloquant
         sh """
-          curl -X POST -H 'Content-type: application/json' \
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
           --data @- "$SLACK" <<'JSON'
           {
             "text": "❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}"
