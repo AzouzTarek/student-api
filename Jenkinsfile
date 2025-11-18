@@ -47,15 +47,20 @@ pipeline {
 
           // Wait for DB inside the container
           sh '''
-            echo "Waiting for PostgreSQL to be ready..."
-            for i in {1..30}; do
-              docker exec postgres-student pg_isready -U student -d studentdb && exit 0
-              echo "Postgres not ready yet..."
-              sleep 2
-            done
-            echo "❌ PostgreSQL did not start in time"
-            exit 1
-          '''
+  echo "Waiting 3s for Postgres container to stabilize..."
+  sleep 3
+
+  echo "Checking PostgreSQL readiness..."
+  for i in {1..20}; do
+    docker exec postgres-student pg_isready -U student -d studentdb && exit 0
+    echo "Postgres not ready yet..."
+    sleep 2
+  done
+
+  echo "❌ PostgreSQL did not start in time"
+  exit 1
+'''
+
         }
       }
     }
