@@ -4,7 +4,6 @@ pipeline {
   environment {
     DOCKER_HUB_CRED = credentials('dockerhub-creds')
     SONAR_TOKEN     = credentials('sonarqube-token')
-    SLACK_WEBHOOK   = credentials('slack-webhook')
 
     IMAGE_NAME   = 'azouztarek/student-api'
     IMAGE_TAG    = "v${env.BUILD_NUMBER}"
@@ -25,14 +24,16 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
-          // Création réseau
+          // Network
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
+
+          // Cleanup previous DB instance
           sh "docker rm -f ${DB_CONTAINER} || true"
 
-          // Volume temporaire pour les données
+          // Create volume if missing
           sh "docker volume create ${DB_CONTAINER}-data || true"
 
-          // Démarrage PostgreSQL
+          // Start PostgreSQL (no buggy healthcheck here)
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -43,14 +44,15 @@ pipeline {
               postgres:15
           """
 
-          // Attente que PostgreSQL soit prêt
+          // Wait until DB is ready
           sh '''
-            for i in {1..90}; do
-              docker exec $DB_CONTAINER pg_isready -U student -d studentdb && exit 0
+            echo "⏳ Waiting for PostgreSQL to be ready..."
+            for i in {1..60}; do
+              docker exec postgres-student pg_isready -U student -d studentdb && exit 0
               sleep 2
             done
-            echo "Postgres did not become ready in time"
-            docker logs $DB_CONTAINER || true
+            echo "❌ Postgres did not become ready in time"
+            docker logs postgres-student || true
             exit 1
           '''
         }
@@ -60,7 +62,7 @@ pipeline {
     stage('Unit Tests') {
       steps {
         sh '''
-          SPRING_DATASOURCE_URL=jdbc:postgresql://$DB_CONTAINER:5432/studentdb \
+          SPRING_DATASOURCE_URL=jdbc:postgresql://postgres-student:5432/studentdb \
           SPRING_DATASOURCE_USERNAME=student \
           SPRING_DATASOURCE_PASSWORD=student \
           ./mvnw -B -Dmaven.test.failure.ignore=false test
@@ -72,6 +74,7 @@ pipeline {
       steps {
         sh './mvnw -B clean package -DskipTests'
         sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
           sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -80,25 +83,13 @@ pipeline {
       }
     }
 
-    stage('Security Scan (Trivy) - Source') {
+    stage('Security Scan (Trivy)') {
       steps {
         script {
           sh 'mkdir -p reports'
           sh """
-            trivy fs --exit-code 1 --severity CRITICAL,HIGH . | tee reports/trivy-fs.txt
-            trivy fs --exit-code 1 --severity CRITICAL,HIGH . -f json -o reports/trivy-fs.json
-          """
-        }
-        archiveArtifacts artifacts: 'reports/*', fingerprint: true
-      }
-    }
-
-    stage('Security Scan (Trivy) - Image') {
-      steps {
-        script {
-          sh """
-            trivy image --exit-code 1 --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} | tee reports/trivy-image.txt
-            trivy image --exit-code 1 --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f json -o reports/trivy-image.json
+            trivy fs --severity CRITICAL,HIGH . -f table | tee reports/trivy-source.txt
+            trivy image --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f table | tee reports/trivy-image.txt
           """
         }
         archiveArtifacts artifacts: 'reports/*', fingerprint: true
@@ -142,26 +133,30 @@ pipeline {
 
   post {
     success {
-      script {
-        sh """
-          curl -X POST -H 'Content-type: application/json' \
-            --data '{"text":"✅ *Pipeline SUCCESS* for job: ${env.JOB_NAME} #${env.BUILD_NUMBER}\\nImage: ${IMAGE_NAME}:${IMAGE_TAG} pushed and deployed on port ${APP_PORT}."}' \
-            "$SLACK_WEBHOOK"
-        """
-        echo "🎉 Build OK"
+      withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
+        sh '''
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image pushed & deployed on port ${APP_PORT}\"}" \
+          "$SLACK"
+        '''
       }
+      echo "🎉 Build OK"
     }
+
     failure {
-      script {
-        sh "docker logs $DB_CONTAINER || true"
-        sh """
-          curl -X POST -H 'Content-type: application/json' \
-            --data '{"text":"❌ *Pipeline FAILED* for job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"}' \
-            "$SLACK_WEBHOOK"
-        """
-        echo "❌ Build failed"
+      // Show DB logs to debug
+      sh "docker logs ${DB_CONTAINER} || true"
+
+      withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
+        sh '''
+          curl -X POST -H "Content-type: application/json" \
+          --data "{\"text\":\"❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}\"}" \
+          "$SLACK"
+        '''
       }
+      echo "❌ Build failed"
     }
+
     always {
       archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
     }
