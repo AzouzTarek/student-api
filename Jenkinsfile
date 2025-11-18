@@ -24,16 +24,16 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
-          // Network
+          // Create network if not exists
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
 
-          // Cleanup previous DB instance
+          // Remove old container if exists
           sh "docker rm -f ${DB_CONTAINER} || true"
 
-          // Create volume if missing
+          // Ensure volume exists
           sh "docker volume create ${DB_CONTAINER}-data || true"
 
-          // Start PostgreSQL (no buggy healthcheck here)
+          // Start PostgreSQL
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -44,16 +44,13 @@ pipeline {
               postgres:15
           """
 
-          // Wait until DB is ready
+          // WAIT — no timeout, no fixed delay — waits until PostgreSQL is READY
           sh '''
-            echo "⏳ Waiting for PostgreSQL to be ready..."
-            for i in {1..60}; do
-              docker exec postgres-student pg_isready -U student -d studentdb && exit 0
+            echo "⏳ Waiting for PostgreSQL to become ready..."
+            until docker exec postgres-student pg_isready -U student -d studentdb; do
               sleep 2
             done
-            echo "❌ Postgres did not become ready in time"
-            docker logs postgres-student || true
-            exit 1
+            echo "🔥 PostgreSQL is READY!"
           '''
         }
       }
@@ -99,7 +96,10 @@ pipeline {
     stage('Deployment') {
       steps {
         script {
+          // Cleanup previous app container if exists
           sh "docker rm -f ${APP_CONTAINER} || true"
+
+          // Deploy container
           sh """
             docker run -d --name ${APP_CONTAINER} \
               --network ${NETWORK} \
@@ -132,11 +132,12 @@ pipeline {
   } // stages
 
   post {
+
     success {
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
         sh '''
           curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image pushed & deployed on port ${APP_PORT}\"}" \
+          --data "{\"text\": \"✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}\"}" \
           "$SLACK"
         '''
       }
@@ -144,13 +145,11 @@ pipeline {
     }
 
     failure {
-      // Show DB logs to debug
       sh "docker logs ${DB_CONTAINER} || true"
-
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
         sh '''
           curl -X POST -H "Content-type: application/json" \
-          --data "{\"text\":\"❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}\"}" \
+          --data "{\"text\": \"❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}\"}" \
           "$SLACK"
         '''
       }
@@ -162,3 +161,4 @@ pipeline {
     }
   }
 }
+
