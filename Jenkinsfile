@@ -25,21 +25,25 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
+          // Création réseau
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
           sh "docker rm -f ${DB_CONTAINER} || true"
 
+          // Volume temporaire pour les données
+          sh "docker volume create ${DB_CONTAINER}-data || true"
+
+          // Démarrage PostgreSQL
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
+              -v ${DB_CONTAINER}-data:/var/lib/postgresql/data \
               -e POSTGRES_USER=student \
               -e POSTGRES_PASSWORD=student \
               -e POSTGRES_DB=studentdb \
-              --health-cmd="pg_isready -U student -d studentdb || exit 1" \
-              --health-interval=5s --health-timeout=3s --health-retries=20 \
               postgres:15
           """
 
-          // Attente PostgreSQL prêt
+          // Attente que PostgreSQL soit prêt
           sh '''
             for i in {1..90}; do
               docker exec $DB_CONTAINER pg_isready -U student -d studentdb && exit 0
