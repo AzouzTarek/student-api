@@ -2,14 +2,17 @@ pipeline {
   agent any
 
   environment {
-    DOCKER_HUB_CRED = credentials('dockerhub-creds')
-    SONAR_TOKEN     = credentials('sonarqube-token')
-    SLACK_WEBHOOK   = credentials('slack-webhook')
-    IMAGE_NAME      = 'azouztarek/student-api'
-    IMAGE_TAG       = "v${env.BUILD_NUMBER}"
-    APP_PORT        = "9090"                  // ton app.properties a 9090 ; aligne ici
-    DB_CONTAINER    = "postgres-student"
-    NETWORK         = "student-net"
+    // Credentials Jenkins (Manage Credentials)
+    DOCKER_HUB_CRED = credentials('dockerhub-creds')      // username+password
+    SONAR_TOKEN     = credentials('sonarqube-token')       // secret text
+    SLACK_WEBHOOK   = credentials('slack-webhook')         // si tu utilises un webhook direct (Option B)
+
+    // Paramètres applicatifs
+    IMAGE_NAME   = 'azouztarek/student-api'
+    IMAGE_TAG    = "v${env.BUILD_NUMBER}"
+    APP_PORT     = "9090"                                  // aligné avec application.properties
+    DB_CONTAINER = "postgres-student"
+    NETWORK      = "student-net"
   }
 
   stages {
@@ -23,9 +26,13 @@ pipeline {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
+          // Créer le réseau si absent
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
+
+          // Nettoyer ancien conteneur DB
           sh "docker rm -f ${DB_CONTAINER} || true"
 
+          // Lancer Postgres avec healthcheck correct
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -54,19 +61,17 @@ pipeline {
 
     stage('Build & Docker') {
       steps {
-        // Build Maven sur le host (rapide, cache local Jenkins)
+        // Build Maven sur l’agent (rapide, cache .m2 local Jenkins)
         sh './mvnw clean package -DskipTests'
 
-        // Build image : retry + cache m2 pour éviter les 500 Central
-        sh """
-          DOCKER_BUILDKIT=1 docker build \
-            --build-arg MAVEN_ARGS='-B -q -DskipTests package' \
-            -t ${IMAGE_NAME}:${IMAGE_TAG} -f Dockerfile .
-        """
+        // (Option simple) Construire l'image à partir du jar déjà produit
+        // Assure-toi que ton Dockerfile copie bien target/*.jar (voir note en bas)
+        sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
 
-        // Login sécurisé à Docker Hub
+        // Docker login sécurisé
         sh 'echo "$DOCKER_HUB_CRED_PSW" | docker login -u "$DOCKER_HUB_CRED_USR" --password-stdin'
 
+        // Push
         sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
       }
     }
@@ -74,12 +79,11 @@ pipeline {
     stage('Tests & Deployment') {
       steps {
         script {
-          // Lancer les tests sur le host Jenkins en pointant la DB locale
+          // Lancer les tests en pointant sur la DB locale (host)
           sh '''
             SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/studentdb \
             SPRING_DATASOURCE_USERNAME=student \
             SPRING_DATASOURCE_PASSWORD=student \
-            SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT=org.hibernate.dialect.PostgreSQLDialect \
             ./mvnw test
           '''
 
@@ -87,7 +91,7 @@ pipeline {
           sh "docker rm -f student-api || true"
 
           // Lancer l'app dans le même réseau que la DB.
-          // IMPORTANT: l'app en conteneur doit viser 'postgres-student:5432'
+          // IMPORTANT: dans le conteneur, la DB est joignable via le nom du conteneur Postgres.
           sh """
             docker run -d --name student-api \
               --network ${NETWORK} \
@@ -104,6 +108,7 @@ pipeline {
 
     stage('Start SonarQube') {
       steps {
+        // Redémarrer un Sonar local (si tu l’auto-héberges dans cette pipeline)
         sh "docker rm -f sonarqube || true"
         sh """
           docker run -d --name sonarqube \
@@ -118,38 +123,59 @@ pipeline {
 
     stage('Code Quality & Security') {
       steps {
+        // Sonar via Maven plugin (pas de sonar-scanner requis sur l'agent)
         withSonarQubeEnv('SonarQube') {
-          sh """
-            sonar-scanner \
-              -Dsonar.projectKey=StudentAPI \
-              -Dsonar.sources=. \
-              -Dsonar.java.binaries=target \
-              -Dsonar.login=$SONAR_TOKEN
-          """
+          withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_AUTH_TOKEN')]) {
+            sh """
+              ./mvnw -B -DskipTests \
+                -Dsonar.projectKey=StudentAPI \
+                -Dsonar.host.url=$SONAR_HOST_URL \
+                -Dsonar.login=$SONAR_AUTH_TOKEN \
+                sonar:sonar
+            """
+          }
         }
-        sh "trivy fs . || true"          // ne casse pas le build si vulnérabilités
-        sh "trivy image ${IMAGE_NAME}:${IMAGE_TAG} || true"
+
+        // Trivy via conteneur (ne casse pas le build si vulnérabilités)
+        sh '''
+          docker run --rm -v "$PWD":/src aquasec/trivy:latest fs /src || true
+          docker run --rm aquasec/trivy:latest image '"'"${IMAGE_NAME}:${IMAGE_TAG}"'" || true
+        '''
       }
     }
 
+    // (Optionnel) Quality Gate : nécessite le webhook Sonar -> Jenkins correctement configuré
+    // stage('Quality Gate') {
+    //   steps {
+    //     timeout(time: 5, unit: 'MINUTES') {
+    //       waitForQualityGate()
+    //     }
+    //   }
+    // }
+
     stage('Notifications') {
       steps {
+        // Option A (plugin Slack configuré côté Jenkins : workspace + token global)
         slackSend(
           channel: '#jenkins',
           color: 'good',
-          message: "Build ${env.BUILD_NUMBER} terminé avec succès !",
-          tokenCredentialId: 'slack-webhook'
+          message: "✅ ${env.JOB_NAME} #${env.BUILD_NUMBER} - Build & Tests OK, image: ${IMAGE_NAME}:${IMAGE_TAG}"
         )
+
+        // Option B (Webhook direct si tu n'utilises pas le plugin) :
+        // withCredentials([string(credentialsId: 'slack-webhook', variable: 'WEBHOOK')]) {
+        //   sh 'curl -X POST -H "Content-type: application/json" --data "{\"text\":\"✅ ${JOB_NAME} #${BUILD_NUMBER} OK\"}" "$WEBHOOK"'
+        // }
       }
     }
 
     stage('GitOps Deployment') {
-      when { expression { return false } } // désactivé par défaut tant que tout n’est pas prêt
+      when { expression { return false } } // Désactivé par défaut tant que tout n’est pas finalisé
       steps {
         sh """
           git clone https://github.com/AzouzTarek/k8s-manifests.git
           cd k8s-manifests
-          sed -i 's|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' deployment.yaml
+          sed -i 's|image: .*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' deployment.yaml
           git commit -am 'Update image ${IMAGE_TAG}' || true
           git push origin main
           argocd app sync student-api
@@ -159,19 +185,25 @@ pipeline {
 
     stage('Monitoring & Alerting') {
       steps {
-        echo "Prometheus et Grafana doivent être configurés pour surveiller student-api"
+        echo "Prometheus / Grafana : à configurer pour surveiller student-api (dashboards, alerting)."
       }
     }
   }
 
   post {
     failure {
+      // Option A (plugin Slack configuré)
       slackSend(
         channel: '#jenkins',
         color: 'danger',
-        message: "Build ${env.BUILD_NUMBER} a échoué !",
-        tokenCredentialId: 'slack-webhook'
+        message: "❌ ${env.JOB_NAME} #${env.BUILD_NUMBER} — Build KO. Voir logs Jenkins."
       )
+
+      // Option B (Webhook direct)
+      // withCredentials([string(credentialsId: 'slack-webhook', variable: 'WEBHOOK')]) {
+      //   sh 'curl -X POST -H "Content-type: application/json" --data "{\"text\":\"❌ ${JOB_NAME} #${BUILD_NUMBER} KO — voir logs\"}" "$WEBHOOK"'
+      // }
     }
   }
 }
+
