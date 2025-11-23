@@ -20,11 +20,12 @@ pipeline {
   }
 
   stages {
-    stage('Java Check') {
+
+    // --- Check Java avant checkout (mvnw non disponible ici)
+    stage('Java Check (pre-checkout)') {
       steps {
         sh 'echo "JAVA_HOME=$JAVA_HOME"'
         sh 'java -version'
-        sh './mvnw -version'
       }
     }
 
@@ -34,12 +35,20 @@ pipeline {
       }
     }
 
+    // --- mvnw est présent maintenant
+    stage('Java/Maven Wrapper Check (post-checkout)') {
+      steps {
+        sh './mvnw -version'
+      }
+    }
+
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
           sh "docker rm -f ${DB_CONTAINER} || true"
           sh "docker volume create ${DB_CONTAINER}-data || true"
+
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -50,6 +59,7 @@ pipeline {
               -e POSTGRES_DB=studentdb \
               postgres:15
           """
+
           sh '''
             echo "⏳ Waiting for PostgreSQL to become ready..."
             until docker exec postgres-student pg_isready -U student -d studentdb; do
@@ -78,6 +88,7 @@ pipeline {
       steps {
         sh './mvnw -B clean package -DskipTests'
         sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
           sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -86,11 +97,13 @@ pipeline {
       }
     }
 
+    // --- Trivy depuis le conteneur officiel (pas besoin d’installation locale)
     stage('Security Scan (Trivy)') {
       steps {
         script {
           sh 'mkdir -p reports'
-          // Trivy FS
+
+          // Scan du code (filesystem)
           sh """
             docker run --rm \
               -v "$PWD":/workspace \
@@ -98,7 +111,8 @@ pipeline {
               aquasec/trivy:0.56.0 fs --severity CRITICAL,HIGH /workspace -f table \
               | tee reports/trivy-source.txt
           """
-          // Trivy Image
+
+          // Scan de l'image construite
           sh """
             docker run --rm \
               -v /var/lib/jenkins/.cache/trivy:/root/.cache/ \
@@ -128,16 +142,30 @@ pipeline {
       }
     }
 
+    // --- Sonar : à choisir (Plugin Maven OU Scanner CLI)
     stage('SonarQube Analysis') {
       steps {
         withSonarQubeEnv('SonarQube') {
           withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_AUTH_TOKEN')]) {
+            // Si tu ajoutes le plugin Sonar dans pom.xml :
             sh """
               ./mvnw -B sonar:sonar \
                 -Dsonar.projectKey=StudentAPI \
                 -Dsonar.host.url=$SONAR_HOST_URL \
                 -Dsonar.login=$SONAR_AUTH_TOKEN
             """
+            // Sinon, remplace ci-dessus par le scanner CLI en Docker :
+            // sh """
+            //   docker run --rm \
+            //     -v "$PWD":/src \
+            //     -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+            //     sonarsource/sonar-scanner-cli:5 \
+            //     sonar-scanner \
+            //       -Dsonar.projectKey=StudentAPI \
+            //       -Dsonar.sources=/src \
+            //       -Dsonar.java.binaries=/src/target/classes \
+            //       -Dsonar.login=$SONAR_AUTH_TOKEN
+            // """
           }
         }
       }
