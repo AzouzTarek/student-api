@@ -2,9 +2,7 @@
 pipeline {
   agent any
 
-  options {
-    skipDefaultCheckout(true)
-  }
+  options { skipDefaultCheckout(true) }
 
   environment {
     JAVA_HOME = "/usr/lib/jvm/java-1.17.0-openjdk-amd64"
@@ -92,9 +90,20 @@ pipeline {
       steps {
         script {
           sh 'mkdir -p reports'
+          // Trivy FS
           sh """
-            trivy fs --severity CRITICAL,HIGH . -f table | tee reports/trivy-source.txt
-            trivy image --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f table | tee reports/trivy-image.txt
+            docker run --rm \
+              -v "$PWD":/workspace \
+              -v /var/lib/jenkins/.cache/trivy:/root/.cache/ \
+              aquasec/trivy:0.56.0 fs --severity CRITICAL,HIGH /workspace -f table \
+              | tee reports/trivy-source.txt
+          """
+          // Trivy Image
+          sh """
+            docker run --rm \
+              -v /var/lib/jenkins/.cache/trivy:/root/.cache/ \
+              aquasec/trivy:0.56.0 image --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f table \
+              | tee reports/trivy-image.txt
           """
         }
         archiveArtifacts artifacts: 'reports/*', fingerprint: true
@@ -124,7 +133,7 @@ pipeline {
         withSonarQubeEnv('SonarQube') {
           withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_AUTH_TOKEN')]) {
             sh """
-              ./mvnw sonar:sonar \
+              ./mvnw -B sonar:sonar \
                 -Dsonar.projectKey=StudentAPI \
                 -Dsonar.host.url=$SONAR_HOST_URL \
                 -Dsonar.login=$SONAR_AUTH_TOKEN
