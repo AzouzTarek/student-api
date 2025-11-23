@@ -1,19 +1,15 @@
+
 pipeline {
   agent any
 
-
-tools {
-    jdk 'JDK21'        // correspond au nom déclaré dans Global Tool Configuration
-   
-  }
-
-
   options {
-    // On garde un checkout explicite uniquement dans notre stage 'Checkout'
     skipDefaultCheckout(true)
   }
 
   environment {
+    JAVA_HOME = "/usr/lib/jvm/java-1.21.0-openjdk-amd64"
+    PATH = "${JAVA_HOME}/bin:${env.PATH}"
+
     DOCKER_HUB_CRED = credentials('dockerhub-creds')
     SONAR_TOKEN     = credentials('sonarqube-token')
 
@@ -26,6 +22,13 @@ tools {
   }
 
   stages {
+    stage('Java Check') {
+      steps {
+        sh 'echo "JAVA_HOME=$JAVA_HOME"'
+        sh 'java -version'
+        sh './mvnw -version'
+      }
+    }
 
     stage('Checkout') {
       steps {
@@ -36,16 +39,9 @@ tools {
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
-          // Crée le réseau si besoin
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
-
-          // Nettoie l'ancien conteneur si présent
           sh "docker rm -f ${DB_CONTAINER} || true"
-
-          // Volume persistant
           sh "docker volume create ${DB_CONTAINER}-data || true"
-
-          // 👉 IMPORTANT : on expose le port 5432 sur l'hôte pour les tests Maven
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -56,8 +52,6 @@ tools {
               -e POSTGRES_DB=studentdb \
               postgres:15
           """
-
-          // Attend que Postgres soit prêt (pg_isready)
           sh '''
             echo "⏳ Waiting for PostgreSQL to become ready..."
             until docker exec postgres-student pg_isready -U student -d studentdb; do
@@ -71,7 +65,6 @@ tools {
 
     stage('Unit Tests') {
       steps {
-        // 👉 Les tests tournent sur l'hôte : on vise 127.0.0.1:5432 (port exposé)
         sh '''
           ./mvnw -B -Dmaven.test.failure.ignore=false \
             -Dspring.datasource.url=jdbc:postgresql://127.0.0.1:5432/studentdb \
@@ -87,7 +80,6 @@ tools {
       steps {
         sh './mvnw -B clean package -DskipTests'
         sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
-
         withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
           sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -113,8 +105,6 @@ tools {
       steps {
         script {
           sh "docker rm -f ${APP_CONTAINER} || true"
-
-          // 👉 Ici on reste dans le réseau Docker : on peut utiliser le host 'postgres-student'
           sh """
             docker run -d --name ${APP_CONTAINER} \
               --network ${NETWORK} \
@@ -143,39 +133,28 @@ tools {
         }
       }
     }
-  } // stages
+  }
 
   post {
     success {
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        sh """
-          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
-          --data @- "$SLACK" <<'JSON'
-          {
-            "text": "✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
-          }
-JSON
-        """
+        writeFile file: 'payload.json', text: """{
+          "text": "✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
+        }"""
+        sh 'curl --fail-with-body -sS -X POST -H "Content-type: application/json" --data-binary @payload.json "$SLACK"'
       }
       echo "🎉 Build OK"
     }
-
     failure {
       sh "docker logs ${DB_CONTAINER} || true"
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        // Warning d'interpolation de secret attendu, non bloquant
-        sh """
-          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
-          --data @- "$SLACK" <<'JSON'
-          {
-            "text": "❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}"
-          }
-JSON
-        """
+        writeFile file: 'payload.json', text: """{
+          "text": "❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}"
+        }"""
+        sh 'curl --fail-with-body -sS -X POST -H "Content-type: application/json" --data-binary @payload.json "$SLACK"'
       }
       echo "❌ Build failed"
     }
-
     always {
       archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
     }
