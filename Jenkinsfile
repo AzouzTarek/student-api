@@ -7,6 +7,9 @@ pipeline {
   }
 
   environment {
+    JAVA_HOME = "/usr/lib/jvm/java-1.17.0-openjdk-amd64"
+    PATH = "${JAVA_HOME}/bin:${env.PATH}"
+
     DOCKER_HUB_CRED = credentials('dockerhub-creds')
     SONAR_TOKEN     = credentials('sonarqube-token')
 
@@ -20,6 +23,13 @@ pipeline {
 
   stages {
 
+   // --- Check Java avant checkout (mvnw non disponible ici)
+    stage('Java Check (pre-checkout)') {
+      steps {
+        sh 'echo "JAVA_HOME=$JAVA_HOME"'
+        sh 'java -version'
+      }
+    }
     stage('Checkout') {
       steps {
         git branch: 'main', url: 'https://github.com/AzouzTarek/student-api.git'
