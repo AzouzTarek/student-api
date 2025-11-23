@@ -39,27 +39,26 @@ pipeline {
       }
     }
 
-    stage('Setup Docker Network & PostgreSQL') {
-      steps {
-        script {
-          // Créer le réseau s'il n'existe pas
-          sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
-
-          // (Re)création du conteneur Postgres avec healthcheck
-          sh "docker rm -f ${DB_CONTAINER} || true"
-          sh "docker volume create ${DB_CONTAINER}-data || true"
-          sh """
-            docker run -d --name ${DB_CONTAINER} \
-              --network ${NETWORK} \
-              -v ${DB_CONTAINER}-data:/var/lib/postgresql/data \
-              -e POSTGRES_USER=student \
-              -e POSTGRES_PASSWORD=student \
-              -e POSTGRES_DB=studentdb \
-              --health-cmd='pg_isready -U student -d studentdb' \
-              --health-interval=5s --health-retries=20 --health-timeout=3s \
-              postgres:15
-          """
-          // Attendre le healthy
+    
+stage('Setup Docker Network & PostgreSQL') {
+  steps {
+    script {
+      sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
+      sh "docker rm -f ${DB_CONTAINER} || true"
+      sh "docker volume create ${DB_CONTAINER}-data || true"
+      sh """
+        docker run -d --name ${DB_CONTAINER} \
+          --network ${NETWORK} \
++         -p 5432:5432 \
+          -v ${DB_CONTAINER}-data:/var/lib/postgresql/data \
+          -e POSTGRES_USER=student \
+          -e POSTGRES_PASSWORD=student \
+          -e POSTGRES_DB=studentdb \
+          --health-cmd='pg_isready -U student -d studentdb' \
+          --health-interval=5s --health-retries=20 --health-timeout=3s \
+          postgres:15
+      """
+         // Attendre le healthy
           sh '''
             echo "⏳ Waiting for PostgreSQL (health=healthy)..."
             for i in $(seq 1 30); do
@@ -70,9 +69,11 @@ pipeline {
             echo "❌ PostgreSQL did not become healthy in time" >&2
             exit 1
           '''
-        }
-      }
+      
     }
+  }
+}
+
 
     stage('Unit Tests') {
       steps {
