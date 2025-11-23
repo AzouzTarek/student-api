@@ -1,13 +1,12 @@
-
 pipeline {
   agent any
 
-  options { skipDefaultCheckout(true) }
+  options {
+    // On garde un checkout explicite uniquement dans notre stage 'Checkout'
+    skipDefaultCheckout(true)
+  }
 
   environment {
-    JAVA_HOME = "/usr/lib/jvm/java-1.17.0-openjdk-amd64"
-    PATH = "${JAVA_HOME}/bin:${env.PATH}"
-
     DOCKER_HUB_CRED = credentials('dockerhub-creds')
     SONAR_TOKEN     = credentials('sonarqube-token')
 
@@ -21,34 +20,25 @@ pipeline {
 
   stages {
 
-    // --- Check Java avant checkout (mvnw non disponible ici)
-    stage('Java Check (pre-checkout)') {
-      steps {
-        sh 'echo "JAVA_HOME=$JAVA_HOME"'
-        sh 'java -version'
-      }
-    }
-
     stage('Checkout') {
       steps {
         git branch: 'main', url: 'https://github.com/AzouzTarek/student-api.git'
       }
     }
 
-    // --- mvnw est présent maintenant
-    stage('Java/Maven Wrapper Check (post-checkout)') {
-      steps {
-        sh './mvnw -version'
-      }
-    }
-
     stage('Setup Docker Network & PostgreSQL') {
       steps {
         script {
+          // Crée le réseau si besoin
           sh "docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}"
+
+          // Nettoie l'ancien conteneur si présent
           sh "docker rm -f ${DB_CONTAINER} || true"
+
+          // Volume persistant
           sh "docker volume create ${DB_CONTAINER}-data || true"
 
+          // 👉 IMPORTANT : on expose le port 5432 sur l'hôte pour les tests Maven
           sh """
             docker run -d --name ${DB_CONTAINER} \
               --network ${NETWORK} \
@@ -60,6 +50,7 @@ pipeline {
               postgres:15
           """
 
+          // Attend que Postgres soit prêt (pg_isready)
           sh '''
             echo "⏳ Waiting for PostgreSQL to become ready..."
             until docker exec postgres-student pg_isready -U student -d studentdb; do
@@ -73,6 +64,7 @@ pipeline {
 
     stage('Unit Tests') {
       steps {
+        // 👉 Les tests tournent sur l'hôte : on vise 127.0.0.1:5432 (port exposé)
         sh '''
           ./mvnw -B -Dmaven.test.failure.ignore=false \
             -Dspring.datasource.url=jdbc:postgresql://127.0.0.1:5432/studentdb \
@@ -97,27 +89,13 @@ pipeline {
       }
     }
 
-    // --- Trivy depuis le conteneur officiel (pas besoin d’installation locale)
     stage('Security Scan (Trivy)') {
       steps {
         script {
           sh 'mkdir -p reports'
-
-          // Scan du code (filesystem)
           sh """
-            docker run --rm \
-              -v "$PWD":/workspace \
-              -v /var/lib/jenkins/.cache/trivy:/root/.cache/ \
-              aquasec/trivy:0.56.0 fs --severity CRITICAL,HIGH /workspace -f table \
-              | tee reports/trivy-source.txt
-          """
-
-          // Scan de l'image construite
-          sh """
-            docker run --rm \
-              -v /var/lib/jenkins/.cache/trivy:/root/.cache/ \
-              aquasec/trivy:0.56.0 image --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f table \
-              | tee reports/trivy-image.txt
+            trivy fs --severity CRITICAL,HIGH . -f table | tee reports/trivy-source.txt
+            trivy image --severity CRITICAL,HIGH ${IMAGE_NAME}:${IMAGE_TAG} -f table | tee reports/trivy-image.txt
           """
         }
         archiveArtifacts artifacts: 'reports/*', fingerprint: true
@@ -128,6 +106,8 @@ pipeline {
       steps {
         script {
           sh "docker rm -f ${APP_CONTAINER} || true"
+
+          // 👉 Ici on reste dans le réseau Docker : on peut utiliser le host 'postgres-student'
           sh """
             docker run -d --name ${APP_CONTAINER} \
               --network ${NETWORK} \
@@ -142,56 +122,53 @@ pipeline {
       }
     }
 
-    // --- Sonar : à choisir (Plugin Maven OU Scanner CLI)
     stage('SonarQube Analysis') {
       steps {
         withSonarQubeEnv('SonarQube') {
           withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_AUTH_TOKEN')]) {
-            // Si tu ajoutes le plugin Sonar dans pom.xml :
             sh """
-              ./mvnw -B sonar:sonar \
+              ./mvnw sonar:sonar \
                 -Dsonar.projectKey=StudentAPI \
                 -Dsonar.host.url=$SONAR_HOST_URL \
                 -Dsonar.login=$SONAR_AUTH_TOKEN
             """
-            // Sinon, remplace ci-dessus par le scanner CLI en Docker :
-            // sh """
-            //   docker run --rm \
-            //     -v "$PWD":/src \
-            //     -e SONAR_HOST_URL="$SONAR_HOST_URL" \
-            //     sonarsource/sonar-scanner-cli:5 \
-            //     sonar-scanner \
-            //       -Dsonar.projectKey=StudentAPI \
-            //       -Dsonar.sources=/src \
-            //       -Dsonar.java.binaries=/src/target/classes \
-            //       -Dsonar.login=$SONAR_AUTH_TOKEN
-            // """
           }
         }
       }
     }
-  }
+  } // stages
 
   post {
     success {
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        writeFile file: 'payload.json', text: """{
-          "text": "✅ *Pipeline SUCCESS* - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
-        }"""
-        sh 'curl --fail-with-body -sS -X POST -H "Content-type: application/json" --data-binary @payload.json "$SLACK"'
+        sh """
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
+          --data @- "$SLACK" <<'JSON'
+          {
+            "text": "✅ Pipeline SUCCESS - Job: ${JOB_NAME} #${BUILD_NUMBER} - Image deployed on port ${APP_PORT}"
+          }
+JSON
+        """
       }
       echo "🎉 Build OK"
     }
+
     failure {
       sh "docker logs ${DB_CONTAINER} || true"
       withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK')]) {
-        writeFile file: 'payload.json', text: """{
-          "text": "❌ *Pipeline FAILED* - Job: ${JOB_NAME} #${BUILD_NUMBER}"
-        }"""
-        sh 'curl --fail-with-body -sS -X POST -H "Content-type: application/json" --data-binary @payload.json "$SLACK"'
+        // Warning d'interpolation de secret attendu, non bloquant
+        sh """
+          curl --fail-with-body -sS -X POST -H 'Content-type: application/json' \
+          --data @- "$SLACK" <<'JSON'
+          {
+            "text": "❌ Pipeline FAILED - Job: ${JOB_NAME} #${BUILD_NUMBER}"
+          }
+JSON
+        """
       }
       echo "❌ Build failed"
     }
+
     always {
       archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
     }
