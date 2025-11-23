@@ -147,3 +147,4 @@ pipeline {
       archiveArtifacts artifacts: 'reports/*', allowEmptyArchive: true
     }
   }
+}
