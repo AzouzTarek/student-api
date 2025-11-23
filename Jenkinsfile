@@ -1,6 +1,13 @@
 pipeline {
   agent any
 
+
+tools {
+    jdk 'JDK21'        // correspond au nom déclaré dans Global Tool Configuration
+   
+  }
+
+
   options {
     // On garde un checkout explicite uniquement dans notre stage 'Checkout'
     skipDefaultCheckout(true)
